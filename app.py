@@ -198,6 +198,10 @@ def _freecad_script_runners() -> list[list[str]]:
     for candidate in (shutil.which("freecad.cmd"), "/snap/bin/freecad.cmd"):
         if candidate and Path(candidate).exists():
             runners.append([candidate])
+    for exe_name in ("freecadcmd", "FreeCADCmd"):
+        exe = shutil.which(exe_name)
+        if exe:
+            runners.append([exe])
     deduped: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
     for r in runners:
@@ -223,8 +227,8 @@ def _run_fcstd_export_script(
     runners = _freecad_script_runners()
     if not runners:
         return (
-            "No FreeCAD runner found for export scripts. Install snap package freecad or "
-            "ensure freecad.cmd is on PATH."
+            "No FreeCAD runner found for export scripts. Install snap package freecad, "
+            "ensure freecad.cmd is on PATH, or install freecadcmd (e.g. apt package freecad)."
         )
 
     last_err = ""

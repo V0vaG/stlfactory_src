@@ -1,0 +1,36 @@
+# Compose (optional). If `docker compose` is missing, use plain Docker instead:
+#   chmod +x scripts/docker-run.sh && ./scripts/docker-run.sh
+#
+# Installing Compose plugin:
+#   - Ubuntu: enable Docker's apt repo (https://docs.docker.com/engine/install/ubuntu/)
+#     then: sudo apt install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+#   - Or standalone Compose V2 binary from GitHub releases:
+#     https://github.com/docker/compose/releases  (install as docker-compose in PATH)
+#
+# Then: docker compose build && docker compose up
+#
+services:
+  web:
+    build: .
+    image: stlfactory:local
+    ports:
+      - "5000:5000"
+    volumes:
+      # Keep CAD models on the host; edits appear without rebuild.
+      - ./models:/app/models
+    environment:
+      FLASK_DEBUG: "0"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u; u.urlopen('http://127.0.0.1:5000/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
