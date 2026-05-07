@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, send_file
 
@@ -13,6 +15,21 @@ app = Flask(__name__)
 MODELS_DIR = PROJECT_ROOT / "models"
 EXPORT_FCSTD_SCRIPT = PROJECT_ROOT / "export_fcstd.py"
 PARAMETERS_FILENAME = "parameters.json"
+
+
+def _running_in_docker() -> bool:
+    return Path("/.dockerenv").exists()
+
+
+def _wrap_headless_gui_cmd(cmd: list[str]) -> list[str]:
+    """FreeCAD uses Qt/Coin; in Docker prefer Xvfb when available."""
+    if not _running_in_docker():
+        return cmd
+    xvfb = shutil.which("xvfb-run")
+    if xvfb:
+        return [xvfb, "-a", *cmd]
+    return cmd
+
 
 DEFAULT_PARAMETER_SCHEMA: list[dict[str, str]] = [
     {"label": "Length", "cell": "A1"},
@@ -190,18 +207,40 @@ def _parse_param_floats(
     return out, None
 
 
-def _freecad_script_runners() -> list[list[str]]:
+def _freecad_cli_only_runners() -> list[list[str]]:
     runners: list[list[str]] = []
-    snap_bin = shutil.which("snap")
-    if snap_bin:
-        runners.append([snap_bin, "run", "freecad.cmd"])
-    for candidate in (shutil.which("freecad.cmd"), "/snap/bin/freecad.cmd"):
-        if candidate and Path(candidate).exists():
-            runners.append([candidate])
     for exe_name in ("freecadcmd", "FreeCADCmd"):
         exe = shutil.which(exe_name)
         if exe:
             runners.append([exe])
+    return runners
+
+
+def _freecad_script_runners() -> list[list[str]]:
+    runners: list[list[str]] = []
+    in_docker = _running_in_docker()
+
+    def add_snap_based() -> None:
+        snap_bin = shutil.which("snap")
+        if snap_bin:
+            runners.append([snap_bin, "run", "freecad.cmd"])
+        for candidate in (shutil.which("freecad.cmd"), "/snap/bin/freecad.cmd"):
+            if candidate and Path(candidate).exists():
+                runners.append([candidate])
+
+    def add_freecad_cli() -> None:
+        for exe_name in ("freecadcmd", "FreeCADCmd"):
+            exe = shutil.which(exe_name)
+            if exe:
+                runners.append([exe])
+
+    if in_docker:
+        add_freecad_cli()
+        add_snap_based()
+    else:
+        add_snap_based()
+        add_freecad_cli()
+
     deduped: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
     for r in runners:
@@ -212,45 +251,137 @@ def _freecad_script_runners() -> list[list[str]]:
     return deduped
 
 
+_DOCKER_FCSTD_HELPER_TEMPLATE = """import json
+import os
+from pathlib import Path
+import FreeCAD as App
+import Mesh
+
+FCSTD = Path({fcstd})
+STL_OUT = Path({stl})
+
+doc = App.openDocument(str(FCSTD))
+sheet = doc.getObject("Spreadsheet")
+if sheet is None:
+    for o in doc.Objects:
+        if getattr(o, "TypeId", "") == "Spreadsheet::Sheet":
+            sheet = o
+            break
+if sheet is None:
+    raise RuntimeError("Spreadsheet not found")
+
+p = os.environ.get("STL_FACTORY_PARAMS_FILE")
+if p:
+    pp = Path(p)
+    if pp.is_file():
+        raw = json.loads(pp.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise RuntimeError("STL_FACTORY_PARAMS_FILE must contain a JSON object")
+        for cell in sorted(raw.keys()):
+            val = raw[cell]
+            if isinstance(val, bool):
+                txt = str(val)
+            elif isinstance(val, (int, float)):
+                txt = f"{{val:g}}"
+            else:
+                txt = str(val).strip()
+            sheet.set(str(cell), txt)
+            print(f"STL_FACTORY docker-helper set {{cell}} = {{txt}}", flush=True)
+
+doc.recompute()
+doc.recompute()
+
+body = None
+for obj in doc.Objects:
+    if obj.TypeId == "PartDesign::Body":
+        body = obj
+        break
+if body is None:
+    raise RuntimeError("No PartDesign Body found")
+
+Mesh.export([body.Tip], str(STL_OUT))
+App.closeDocument(doc.Name)
+"""
+
+
+def _docker_fcstd_helper_source(fcstd: Path, stl_out: Path) -> str:
+    fc = str(fcstd.resolve())
+    st = str(stl_out.resolve())
+    return _DOCKER_FCSTD_HELPER_TEMPLATE.format(fcstd=repr(fc), stl=repr(st))
+
+
 def _run_fcstd_export_script(
     fcstd_file: Path,
     param_values: dict[str, float] | None,
 ) -> str | None:
-    if not EXPORT_FCSTD_SCRIPT.is_file():
-        return f"Missing export script at {EXPORT_FCSTD_SCRIPT.name} in project root."
+    stl_expected = fcstd_file.with_suffix(".stl")
+    param_path: str | None = None
+    helper_path: str | None = None
+    env = os.environ.copy()
 
-    args = [str(EXPORT_FCSTD_SCRIPT.resolve()), str(fcstd_file.resolve())]
-    if param_values:
-        for cell in sorted(param_values.keys()):
-            args.append(f"{cell}={param_values[cell]:g}")
+    try:
+        if param_values:
+            fd, param_path = tempfile.mkstemp(suffix=".params.json", text=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                json.dump(param_values, tmp)
+            env["STL_FACTORY_PARAMS_FILE"] = param_path
 
-    runners = _freecad_script_runners()
-    if not runners:
-        return (
-            "No FreeCAD runner found for export scripts. Install snap package freecad, "
-            "ensure freecad.cmd is on PATH, or install freecadcmd (e.g. apt package freecad)."
-        )
+        if _running_in_docker():
+            # FreeCADCmd often drops argv after the script path; run a tiny worker .py + JSON env.
+            hfd, helper_path = tempfile.mkstemp(suffix=".stl_factory_fcstd.py", text=True)
+            with os.fdopen(hfd, "w", encoding="utf-8") as tmp:
+                tmp.write(_docker_fcstd_helper_source(fcstd_file, stl_expected))
+            runners = _freecad_cli_only_runners()
+            cmd_args_list: list[list[str]] = [[helper_path]]
+        else:
+            if not EXPORT_FCSTD_SCRIPT.is_file():
+                return f"Missing export script at {EXPORT_FCSTD_SCRIPT.name} in project root."
+            args = [str(EXPORT_FCSTD_SCRIPT.resolve()), str(fcstd_file.resolve())]
+            if param_path:
+                args.append(param_path)
+            runners = _freecad_script_runners()
+            cmd_args_list = [args]
 
-    last_err = ""
-    cwd = str(PROJECT_ROOT)
-    for prefix in runners:
-        cmd = prefix + args
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=180,
+        if not runners:
+            return (
+                "No FreeCAD runner found for export scripts. Install snap package freecad, "
+                "ensure freecad.cmd is on PATH, or install freecadcmd (e.g. apt package freecad)."
             )
-        except subprocess.TimeoutExpired:
-            return "Conversion timed out after 180 seconds."
-        if result.returncode == 0:
-            return None
-        last_err = (result.stderr or result.stdout or "").strip()
 
-    return f"FreeCAD export script failed: {last_err or 'unknown error'}"
+        last_err = ""
+        last_rc: int | None = None
+        cwd = str(PROJECT_ROOT)
+        for prefix in runners:
+            for extra in cmd_args_list:
+                cmd = _wrap_headless_gui_cmd(prefix + extra)
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        cwd=cwd,
+                        env=env,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=180,
+                    )
+                except subprocess.TimeoutExpired:
+                    return "Conversion timed out after 180 seconds."
+                if result.returncode == 0:
+                    return None
+                last_rc = result.returncode
+                combined = (result.stderr or "") + "\n" + (result.stdout or "")
+                last_err = combined.strip()
+
+        detail = last_err[:4000] if last_err else "unknown error"
+        rc_part = f"exit {last_rc}" if last_rc is not None else "unknown exit"
+        return f"FreeCAD export script failed ({rc_part}): {detail}"
+    finally:
+        for p in (param_path, helper_path):
+            if p:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def _convert_cad_to_stl(
@@ -258,7 +389,11 @@ def _convert_cad_to_stl(
     stl_file: Path,
     param_values: dict[str, float] | None = None,
 ) -> str | None:
-    if cad_file.suffix.lower() == ".fcstd" and EXPORT_FCSTD_SCRIPT.is_file():
+    # Prefer export_fcstd.py (host) or Docker helper + JSON env; Docker FreeCADCmd often drops argv.
+    use_fcstd_export_pipeline = cad_file.suffix.lower() == ".fcstd" and (
+        EXPORT_FCSTD_SCRIPT.is_file() or _running_in_docker()
+    )
+    if use_fcstd_export_pipeline:
         script_err = _run_fcstd_export_script(cad_file, param_values)
         if script_err:
             return script_err
@@ -329,7 +464,7 @@ def _convert_cad_to_stl(
         )
     try:
         result = subprocess.run(
-            [freecad_bin, "-c", python_code],
+            _wrap_headless_gui_cmd([freecad_bin, "-c", python_code]),
             check=False,
             capture_output=True,
             text=True,
