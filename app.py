@@ -1,6 +1,8 @@
 from pathlib import Path
+import shutil
+import subprocess
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 
 app = Flask(__name__)
 MODELS_DIR = Path(__file__).resolve().parent / "models"
@@ -15,121 +17,132 @@ def _list_models() -> list[str]:
     )
 
 
-@app.get("/")
-def home():
+def _render_home(error: str | None, values: dict[str, str]) -> str:
     return render_template(
         "index.html",
-        error=None,
-        values={"shape": "cube", "width": "20", "height": "20", "depth": "20"},
+        error=error,
+        values=values,
         models=_list_models(),
     )
 
 
-def _rectangular_prism_stl(width: float, height: float, depth: float) -> str:
-    """Build an ASCII STL for a rectangular prism centered at origin."""
-    hx = width / 2.0
-    hy = height / 2.0
-    hz = depth / 2.0
-
-    vertices = {
-        "nbl": (-hx, -hy, -hz),  # near bottom left
-        "nbr": (hx, -hy, -hz),
-        "ntl": (-hx, hy, -hz),
-        "ntr": (hx, hy, -hz),
-        "fbl": (-hx, -hy, hz),   # far bottom left
-        "fbr": (hx, -hy, hz),
-        "ftl": (-hx, hy, hz),
-        "ftr": (hx, hy, hz),
-    }
-
-    facets = [
-        # top (+y)
-        ((0.0, 1.0, 0.0), ("ntl", "ftl", "ftr")),
-        ((0.0, 1.0, 0.0), ("ntl", "ftr", "ntr")),
-        # bottom (-y)
-        ((0.0, -1.0, 0.0), ("nbl", "fbr", "fbl")),
-        ((0.0, -1.0, 0.0), ("nbl", "nbr", "fbr")),
-        # left (-x)
-        ((-1.0, 0.0, 0.0), ("nbl", "ftl", "ntl")),
-        ((-1.0, 0.0, 0.0), ("nbl", "fbl", "ftl")),
-        # right (+x)
-        ((1.0, 0.0, 0.0), ("nbr", "ntr", "ftr")),
-        ((1.0, 0.0, 0.0), ("nbr", "ftr", "fbr")),
-        # front (-z)
-        ((0.0, 0.0, -1.0), ("nbl", "ntl", "ntr")),
-        ((0.0, 0.0, -1.0), ("nbl", "ntr", "nbr")),
-        # back (+z)
-        ((0.0, 0.0, 1.0), ("fbl", "ftr", "ftl")),
-        ((0.0, 0.0, 1.0), ("fbl", "fbr", "ftr")),
-    ]
-
-    lines = ["solid cube"]
-    for normal, triangle in facets:
-        lines.append(
-            f"  facet normal {normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f}"
-        )
-        lines.append("    outer loop")
-        for vertex_name in triangle:
-            x, y, z = vertices[vertex_name]
-            lines.append(f"      vertex {x:.6f} {y:.6f} {z:.6f}")
-        lines.append("    endloop")
-        lines.append("  endfacet")
-    lines.append("endsolid cube")
-    lines.append("")
-    return "\n".join(lines)
+def _model_folder(model_name: str) -> Path:
+    return MODELS_DIR / Path(model_name).name
 
 
-@app.post("/generate-stl")
-def generate_stl():
-    shape = request.form.get("shape", "cube")
-    width_raw = request.form.get("width", "")
-    height_raw = request.form.get("height", "")
-    depth_raw = request.form.get("depth", "")
+def _first_file_by_extension(folder: Path, extension: str) -> Path | None:
+    files = sorted(
+        [path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == extension.lower()]
+    )
+    return files[0] if files else None
 
-    values = {
-        "shape": shape,
-        "width": width_raw,
-        "height": height_raw,
-        "depth": depth_raw,
-    }
 
-    if shape != "cube":
-        return (
-            render_template(
-                "index.html",
-                error="Only cube is supported for now.",
-                values=values,
-                models=_list_models(),
-            ),
-            400,
-        )
+def _first_file_by_extensions(folder: Path, extensions: list[str]) -> Path | None:
+    for extension in extensions:
+        match = _first_file_by_extension(folder, extension)
+        if match is not None:
+            return match
+    return None
 
+
+def _convert_cad_to_stl(cad_file: Path, stl_file: Path) -> str | None:
+    freecad_bin = (
+        shutil.which("freecadcmd")
+        or shutil.which("FreeCADCmd")
+        or ("/snap/bin/freecad.cmd" if Path("/snap/bin/freecad.cmd").exists() else None)
+    )
+    if freecad_bin is None:
+        return "FreeCAD CLI is not installed. Install it (snap: freecad) to enable auto-conversion."
+
+    python_code = (
+        "import FreeCAD, Import, Mesh;"
+        "doc=Import.open("
+        f"{str(cad_file)!r}"
+        ");"
+        "doc.recompute();"
+        "objs=[o for o in doc.Objects if hasattr(o, 'Shape') and not o.Shape.isNull()];"
+        "Mesh.export(objs, "
+        f"{str(stl_file)!r}"
+        ");"
+        "FreeCAD.closeDocument(doc.Name)"
+    )
     try:
-        width = float(width_raw)
-        height = float(height_raw)
-        depth = float(depth_raw)
-    except ValueError:
-        return render_template(
-            "index.html",
-            error="Dimensions must be valid numbers.",
-            values=values,
-            models=_list_models(),
-        ), 400
+        result = subprocess.run(
+            [freecad_bin, "-c", python_code],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return "Conversion timed out after 180 seconds."
 
-    if width <= 0 or height <= 0 or depth <= 0:
-        return render_template(
-            "index.html",
-            error="All dimensions must be greater than 0.",
-            values=values,
-            models=_list_models(),
-        ), 400
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        if "no supported file format" in err.lower():
+            return (
+                f"FreeCAD cannot import {cad_file.suffix} directly on this setup. "
+                "Please export your model to STEP (.step/.stp) and place it in the same folder."
+            )
+        return f"FreeCAD conversion failed: {err or 'unknown error'}"
+    return None
 
-    stl_content = _rectangular_prism_stl(width, height, depth)
-    filename = f"cube_{width:g}x{height:g}x{depth:g}.stl"
-    return Response(
-        stl_content,
+
+@app.get("/")
+def home():
+    return _render_home(
+        error=None,
+        values={
+            "model_name": "",
+        },
+    )
+
+
+@app.post("/download-model-stl")
+def download_model_stl():
+    model_name = request.form.get("model_name", "").strip()
+    values = {
+        "model_name": model_name,
+    }
+
+    if not model_name:
+        return _render_home(error="Please select a model first.", values=values), 400
+
+    model_dir = _model_folder(model_name)
+    if not model_dir.exists() or not model_dir.is_dir():
+        return _render_home(error=f"Model folder '{model_name}' was not found.", values=values), 404
+
+    stl_file = _first_file_by_extension(model_dir, ".stl")
+    if stl_file is None:
+        source_file = _first_file_by_extensions(
+            model_dir,
+            [".step", ".stp", ".iges", ".igs", ".sldprt"],
+        )
+        if source_file is None:
+            return _render_home(
+                error=(
+                    f"No convertible CAD file found in '{model_name}'. "
+                    "Add one of: .step, .stp, .iges, .igs, or .sldprt."
+                ),
+                values=values,
+            ), 400
+
+        generated_stl = model_dir / f"{source_file.stem}.stl"
+        conversion_error = _convert_cad_to_stl(source_file, generated_stl)
+        if conversion_error:
+            return _render_home(error=conversion_error, values=values), 400
+        stl_file = generated_stl if generated_stl.exists() else _first_file_by_extension(model_dir, ".stl")
+        if stl_file is None:
+            return _render_home(
+                error="Conversion finished but no STL file was found in the model folder.",
+                values=values,
+            ), 500
+
+    return send_file(
+        stl_file,
         mimetype="model/stl",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        as_attachment=True,
+        download_name=stl_file.name,
     )
 
 

@@ -7,7 +7,8 @@ Expected structure:
 ```
 models/
   <model-name>/
-    <file>.sldprt
+    <file>.step    # preferred for conversion
+    # or: .stp / .iges / .igs / .sldprt
 ```
 
 Example:
@@ -15,7 +16,7 @@ Example:
 ```
 models/
   cube/
-    cube.sldprt
+    cube.step
   bracket/
-    bracket_v2.sldprt
+    bracket_v2.stp
 ```

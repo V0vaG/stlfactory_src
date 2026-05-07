@@ -101,6 +101,13 @@ p {
   margin-top: 24px;
 }
 
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+
 label {
   display: block;
   font-size: 14px;
@@ -182,6 +189,10 @@ select:focus {
   }
 
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .row {
     grid-template-columns: 1fr;
   }
 }
