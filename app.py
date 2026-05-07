@@ -207,13 +207,28 @@ def _parse_param_floats(
     return out, None
 
 
+def _freecad_cli_exe_paths() -> list[str]:
+    """Paths to FreeCAD's batch-mode executable (Debian: ``/usr/bin/freecadcmd``)."""
+    ordered: list[str] = []
+    for name in ("freecadcmd", "FreeCADCmd"):
+        found = shutil.which(name)
+        if found:
+            ordered.append(found)
+    for fixed in ("/usr/bin/freecadcmd", "/usr/bin/FreeCADCmd"):
+        if Path(fixed).is_file():
+            ordered.append(fixed)
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in ordered:
+        key = str(Path(p).resolve())
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
 def _freecad_cli_only_runners() -> list[list[str]]:
-    runners: list[list[str]] = []
-    for exe_name in ("freecadcmd", "FreeCADCmd"):
-        exe = shutil.which(exe_name)
-        if exe:
-            runners.append([exe])
-    return runners
+    return [[exe] for exe in _freecad_cli_exe_paths()]
 
 
 def _freecad_script_runners() -> list[list[str]]:
@@ -229,10 +244,8 @@ def _freecad_script_runners() -> list[list[str]]:
                 runners.append([candidate])
 
     def add_freecad_cli() -> None:
-        for exe_name in ("freecadcmd", "FreeCADCmd"):
-            exe = shutil.which(exe_name)
-            if exe:
-                runners.append([exe])
+        for exe in _freecad_cli_exe_paths():
+            runners.append([exe])
 
     if in_docker:
         add_freecad_cli()
@@ -343,9 +356,11 @@ def _run_fcstd_export_script(
             cmd_args_list = [args]
 
         if not runners:
+            tried = ", ".join(_freecad_cli_exe_paths()) or "(no freecadcmd / FreeCADCmd found)"
             return (
                 "No FreeCAD runner found for export scripts. Install snap package freecad, "
-                "ensure freecad.cmd is on PATH, or install freecadcmd (e.g. apt package freecad)."
+                "ensure freecad.cmd is on PATH, or install freecadcmd (e.g. apt package freecad). "
+                f"In Docker, expected Debian binary under /usr/bin/freecadcmd; tried: {tried}."
             )
 
         last_err = ""
@@ -407,11 +422,10 @@ def _convert_cad_to_stl(
             shutil.copy2(expected, stl_file)
         return None
 
-    freecad_bin = (
-        shutil.which("freecadcmd")
-        or shutil.which("FreeCADCmd")
-        or ("/snap/bin/freecad.cmd" if Path("/snap/bin/freecad.cmd").exists() else None)
-    )
+    paths = _freecad_cli_exe_paths()
+    freecad_bin = paths[0] if paths else None
+    if freecad_bin is None and Path("/snap/bin/freecad.cmd").exists():
+        freecad_bin = "/snap/bin/freecad.cmd"
     if freecad_bin is None:
         return "FreeCAD CLI is not installed. Install it (snap: freecad) to enable auto-conversion."
 

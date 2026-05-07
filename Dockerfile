@@ -1,4 +1,4 @@
-# Includes FreeCAD CLI so export_fcstd.py can run inside the container (no snap).
+# Includes FreeCAD CLI (Debian package provides /usr/bin/freecadcmd) plus Xvfb for headless Qt/Coin.
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        xvfb \
         freecad \
     && rm -rf /var/lib/apt/lists/*
 
