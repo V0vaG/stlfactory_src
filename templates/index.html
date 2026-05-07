@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>STL Cube Generator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="card">
+        <span class="badge">Web STL Builder</span>
+        <h1>Generate a Cube STL</h1>
+        <p>
+          Select the shape, enter dimensions, and download a ready-to-print STL
+          file instantly.
+        </p>
+        <div class="models-panel">
+          <h2>Detected Models</h2>
+          {% if models %}
+          <ul class="models-list">
+            {% for model in models %}
+            <li>{{ model }}</li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p class="hint">No model folders found in <code>models/</code> yet.</p>
+          {% endif %}
+        </div>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <form class="form" method="post" action="/generate-stl">
+          <label for="shape">Shape</label>
+          <select id="shape" name="shape" required>
+            <option value="cube" {% if values.shape == "cube" %}selected{% endif %}>
+              Cube
+            </option>
+          </select>
+
+          <div class="grid">
+            <div>
+              <label for="width">Width (mm)</label>
+              <input
+                id="width"
+                name="width"
+                type="number"
+                min="0.01"
+                step="0.01"
+                value="{{ values.width }}"
+                required
+              />
+            </div>
+            <div>
+              <label for="height">Height (mm)</label>
+              <input
+                id="height"
+                name="height"
+                type="number"
+                min="0.01"
+                step="0.01"
+                value="{{ values.height }}"
+                required
+              />
+            </div>
+            <div>
+              <label for="depth">Depth (mm)</label>
+              <input
+                id="depth"
+                name="depth"
+                type="number"
+                min="0.01"
+                step="0.01"
+                value="{{ values.depth }}"
+                required
+              />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-primary" type="submit">Download STL</button>
+            <a href="/health" class="btn btn-secondary">API Health</a>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>
