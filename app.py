@@ -14,6 +14,20 @@ MODELS_DIR = PROJECT_ROOT / "models"
 EXPORT_FCSTD_SCRIPT = PROJECT_ROOT / "export_fcstd.py"
 PARAMETERS_FILENAME = "parameters.json"
 
+
+def _running_in_docker() -> bool:
+    return Path("/.dockerenv").exists()
+
+
+def _wrap_headless_gui_cmd(cmd: list[str]) -> list[str]:
+    """FreeCAD uses Qt/Coin; in Docker run under Xvfb when available."""
+    if _running_in_docker():
+        xvfb = shutil.which("xvfb-run")
+        if xvfb:
+            return [xvfb, "-a", *cmd]
+    return cmd
+
+
 DEFAULT_PARAMETER_SCHEMA: list[dict[str, str]] = [
     {"label": "Length", "cell": "A1"},
     {"label": "Width", "cell": "A2"},
@@ -192,16 +206,29 @@ def _parse_param_floats(
 
 def _freecad_script_runners() -> list[list[str]]:
     runners: list[list[str]] = []
-    snap_bin = shutil.which("snap")
-    if snap_bin:
-        runners.append([snap_bin, "run", "freecad.cmd"])
-    for candidate in (shutil.which("freecad.cmd"), "/snap/bin/freecad.cmd"):
-        if candidate and Path(candidate).exists():
-            runners.append([candidate])
-    for exe_name in ("freecadcmd", "FreeCADCmd"):
-        exe = shutil.which(exe_name)
-        if exe:
-            runners.append([exe])
+    in_docker = _running_in_docker()
+
+    def add_snap_based() -> None:
+        snap_bin = shutil.which("snap")
+        if snap_bin:
+            runners.append([snap_bin, "run", "freecad.cmd"])
+        for candidate in (shutil.which("freecad.cmd"), "/snap/bin/freecad.cmd"):
+            if candidate and Path(candidate).exists():
+                runners.append([candidate])
+
+    def add_freecad_cli() -> None:
+        for exe_name in ("freecadcmd", "FreeCADCmd"):
+            exe = shutil.which(exe_name)
+            if exe:
+                runners.append([exe])
+
+    if in_docker:
+        add_freecad_cli()
+        add_snap_based()
+    else:
+        add_snap_based()
+        add_freecad_cli()
+
     deduped: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
     for r in runners:
@@ -232,9 +259,10 @@ def _run_fcstd_export_script(
         )
 
     last_err = ""
+    last_rc: int | None = None
     cwd = str(PROJECT_ROOT)
     for prefix in runners:
-        cmd = prefix + args
+        cmd = _wrap_headless_gui_cmd(prefix + args)
         try:
             result = subprocess.run(
                 cmd,
@@ -248,9 +276,13 @@ def _run_fcstd_export_script(
             return "Conversion timed out after 180 seconds."
         if result.returncode == 0:
             return None
-        last_err = (result.stderr or result.stdout or "").strip()
+        last_rc = result.returncode
+        combined = (result.stderr or "") + "\n" + (result.stdout or "")
+        last_err = combined.strip()
 
-    return f"FreeCAD export script failed: {last_err or 'unknown error'}"
+    detail = last_err[:4000] if last_err else "unknown error"
+    rc_part = f"exit {last_rc}" if last_rc is not None else "unknown exit"
+    return f"FreeCAD export script failed ({rc_part}): {detail}"
 
 
 def _convert_cad_to_stl(
@@ -329,7 +361,7 @@ def _convert_cad_to_stl(
         )
     try:
         result = subprocess.run(
-            [freecad_bin, "-c", python_code],
+            _wrap_headless_gui_cmd([freecad_bin, "-c", python_code]),
             check=False,
             capture_output=True,
             text=True,

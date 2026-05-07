@@ -21,6 +21,7 @@ services:
     environment:
       FLASK_DEBUG: "0"
       PYTHONUNBUFFERED: "1"
+      QT_QPA_PLATFORM: "offscreen"
     restart: unless-stopped
     healthcheck:
       test:

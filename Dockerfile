@@ -1,15 +1,26 @@
-# Includes FreeCAD CLI so export_fcstd.py can run inside the container (no snap).
-FROM python:3.12-slim-bookworm
+# Ubuntu + distro FreeCAD packages are more reliable than python-slim + apt freecad
+# (fewer missing Qt/GL bits). Qt uses offscreen mode; Xvfb wraps CLI when /.dockerenv exists.
+FROM ubuntu:22.04
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    FLASK_APP=app.py
+    FLASK_APP=app.py \
+    QT_QPA_PLATFORM=offscreen
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-venv \
         freecad \
-    && rm -rf /var/lib/apt/lists/*
+        xvfb \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && (command -v freecadcmd || command -v FreeCADCmd || (echo "FreeCAD CLI missing" && exit 1))
+
+RUN python3 -m venv /opt/stlfactory
+ENV PATH="/opt/stlfactory/bin:$PATH"
 
 WORKDIR /app
 
