@@ -18,10 +18,10 @@
         <span class="badge">Web STL Builder</span>
         <h1>STL Builder</h1>
         <p>
-          Select one of your model folders from <code>models/</code>. The app
-          will create STL and download it. Best supported input formats are
-          <code>.step/.stp</code> (recommended), <code>.iges/.igs</code>, and in some
-          setups <code>.sldprt</code>.
+          Pick a model folder under <code>models/</code>. After you select it, the form shows one text field per
+          entry in that folder’s <code>parameters.json</code> (for example
+          <code>[["Length = A1", "Width = A2", "Height = A3"]]</code>). Export uses
+          <code>export_fcstd.py</code> in the project root with FreeCAD snap.
         </p>
         <div class="models-panel">
           <h2>Detected Models</h2>
@@ -50,7 +50,47 @@
               </option>
               {% endfor %}
             </select>
-            <button class="btn btn-primary" type="submit">Create and Download STL</button>
+            <div class="row-actions">
+              <button id="previewBtn" class="btn btn-secondary" type="button">Preview</button>
+              <button class="btn btn-primary" type="submit">Download STL</button>
+            </div>
+          </div>
+          <p class="hint param-hint" id="paramHint">
+            {% if values.model_name %}
+            Enter values for each spreadsheet cell defined in parameters.json.
+            {% else %}
+            Select a model to enter parameters from its parameters.json.
+            {% endif %}
+          </p>
+          <div
+            id="param-fields"
+            class="param-fields"
+            data-initial-model="{{ values.model_name | default('', true) }}"
+          >
+            {% if values.model_name %}
+              {% set schema = parameter_schemas.get(values.model_name, []) %}
+              {% if schema %}
+                <h3 class="param-fields-heading">Parameters</h3>
+                <div class="grid param-fields-grid">
+                  {% for entry in schema %}
+                    <div class="param-field">
+                      <label for="param_{{ entry.cell }}">{{ entry.label }} → {{ entry.cell }} (mm)</label>
+                      <input
+                        id="param_{{ entry.cell }}"
+                        name="param_{{ entry.cell }}"
+                        type="text"
+                        inputmode="decimal"
+                        autocomplete="off"
+                        placeholder="e.g. 50"
+                        data-param-cell="{{ entry.cell }}"
+                        class="param-input"
+                        value="{{ param_values.get(entry.cell, '') }}"
+                      />
+                    </div>
+                  {% endfor %}
+                </div>
+              {% endif %}
+            {% endif %}
           </div>
         </form>
         <div class="actions">
@@ -58,5 +98,20 @@
         </div>
       </section>
     </main>
+    <script type="application/json" id="parameter-schemas">{{ parameter_schemas | tojson }}</script>
+    <script type="application/json" id="initial-param-values">{{ param_values | tojson }}</script>
+    <div id="previewModal" class="preview-modal" hidden>
+      <div class="preview-backdrop" data-close-preview></div>
+      <div class="preview-dialog" role="dialog" aria-modal="true" aria-label="STL preview">
+        <div class="preview-header">
+          <strong>Model Preview</strong>
+          <button class="btn btn-secondary preview-close" type="button" data-close-preview>Close</button>
+        </div>
+        <div id="previewError" class="error" hidden></div>
+        <canvas id="previewCanvas" class="preview-canvas"></canvas>
+      </div>
+    </div>
+    <script src="{{ url_for('static', filename='params-ui.js') }}" defer></script>
+    <script type="module" src="{{ url_for('static', filename='preview.js') }}"></script>
   </body>
 </html>
